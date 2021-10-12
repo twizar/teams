@@ -1,1 +1,5 @@
 .idea
+*.env
+!example.env
+teams
+cover.out

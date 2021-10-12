@@ -4,55 +4,62 @@ workflows:
   version: 2
   deploy:
     jobs:
+      - lint:
+          context: Twizar
+      - test:
+          context: Twizar
       - compile-app-bin:
           context: Twizar
-      - upload-bin-to-s3:
-          context: Twizar
           requires:
-            - compile-app-bin
+            - lint
+            - test
       - deploy:
           context: Twizar
           requires:
-            - upload-bin-to-s3
+            - compile-app-bin
 
 orbs:
-  aws-s3: circleci/aws-s3@3.0
+  aws-cli: circleci/aws-cli@2.0.3
+  codecov: codecov/codecov@3.2.0
 
 jobs:
-  compile-app-bin:
+  lint:
     docker:
-      - image: ${DOCKER_REGISTRY_HOST}/golang:1.16beta1-alpine3.12
-        auth:
-          username: ${DOCKER_REGISTRY_USER}
-          password: ${DOCKER_REGISTRY_PASS}
+      - image: golangci/golangci-lint:latest-alpine
     steps:
-      - run: apk update && apk add git build-base
       - checkout
       - run: git config --global url."https://${GITHUB_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
-      - run: GOOS=linux GOARCH=amd64 go build -o /tmp/teams ./internal/cmd/main.go
+      - run: golangci-lint run -v
+  test:
+    docker:
+      - image: cimg/go:1.17.2
+      - image: mongo:5.0.3
+        environment:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: 123
+    steps:
+      - run: env
+      - checkout
+      - run: git config --global url."https://${GITHUB_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+      - run: go test -race -coverprofile=coverage.txt -covermode=atomic -cover -v ./...
+      - codecov/upload
+  compile-app-bin:
+    docker:
+      - image: cimg/go:1.17.2
+    steps:
+      - checkout
+      - run: git config --global url."https://${GITHUB_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+      - run: GOOS=linux GOARCH=amd64 go build -o /tmp/teams_bin ./cmd/main.go
       - persist_to_workspace:
           root: /tmp
           paths:
-            - ./teams
-  upload-bin-to-s3:
+            - ./teams_bin
+  deploy:
     docker:
-      - image: 'cimg/python:3.10'
+      - image: cimg/python:3.10
     steps:
       - attach_workspace:
           at: .
-      - run: zip teams.zip teams
-      - aws-s3/copy:
-          from: teams.zip
-          to: s3://twizar-lambda-bins/teams-bin/
-  deploy:
-    docker:
-      - image: hashicorp/terraform:1.1.0-alpha20211006
-    steps:
-      - run: mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts
-      - run: git clone https://${GITHUB_TOKEN}:x-oauth-basic@github.com/twizar/infra.git .
-      - run: terraform init -backend-config="access_key=${AWS_ACCESS_KEY_ID}" -backend-config="secret_key=${AWS_SECRET_ACCESS_KEY}"
-      #- run: terraform apply -auto-approve -target aws_lambda_function.lambda_teams
-      - run: ls -la
-      - run: terraform plan -target aws_lambda_function.lambda_teams
-      #- run: terraform state list
-# -var="aws_access_key=${AWS_SECRET_ACCESS_KEY}"
+      - aws-cli/setup
+      - run: zip teams.zip teams_bin
+      - run: aws lambda update-function-code --function-name LambdaTeams --zip-file fileb://teams.zip
